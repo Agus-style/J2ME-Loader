@@ -16,6 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -23,11 +24,16 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleOpenDebug
+        run: ./gradlew assembleOpenDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
