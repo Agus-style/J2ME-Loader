@@ -25,7 +25,6 @@ import static ru.playsoftware.j2meloader.util.Constants.PREF_LAST_PATH;
 
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.ActivityOptions;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -37,10 +36,8 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.ContextMenu;
 import android.view.LayoutInflater;
@@ -276,54 +273,8 @@ public class AppsListFragment extends ListFragment {
 	}
 
 	private void startAppFloating(AppItem appItem) {
-		FragmentActivity activity = requireActivity();
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-			DisplayMetrics dm = getResources().getDisplayMetrics();
-			int w = (int) (dm.widthPixels * 0.65f);
-			int h = (int) (dm.heightPixels * 0.60f);
-			int x = (dm.widthPixels - w) / 2;
-			int y = (int) (dm.heightPixels * 0.10f);
-
-			Rect bounds = new Rect(x, y, x + w, y + h);
-			ActivityOptions opts = ActivityOptions.makeBasic();
-			opts.setLaunchBounds(bounds);
-
-			String path = appItem.getPathExt();
-			String name = appItem.getTitle();
-
-			// Cek apakah config sudah ada
-			java.io.File appDir = new java.io.File(path);
-			java.io.File configFile = new java.io.File(
-					appDir.getParentFile().getParent()
-					+ ru.playsoftware.j2meloader.config.Config.MIDLET_CONFIGS_DIR
-					+ appDir.getName());
-
-			Intent intent;
-			if (configFile.exists()) {
-				// Langsung jalankan game
-				intent = new Intent(Intent.ACTION_DEFAULT,
-						android.net.Uri.parse(path),
-						activity,
-						javax.microedition.shell.MicroActivity.class);
-			} else {
-				// Buka settings dulu
-				intent = new Intent(ru.playsoftware.j2meloader.util.Constants.ACTION_EDIT,
-						android.net.Uri.parse(path),
-						activity,
-						ru.playsoftware.j2meloader.config.ConfigActivity.class);
-			}
-			intent.putExtra(ru.playsoftware.j2meloader.util.Constants.KEY_MIDLET_NAME, name);
-			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
-					Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
-			try {
-				activity.startActivity(intent, opts.toBundle());
-			} catch (Exception e) {
-				Toast.makeText(activity, "Freeform tidak didukung di HP ini", Toast.LENGTH_SHORT).show();
-				Config.startApp(activity, name, path, false);
-			}
-		} else {
-			Toast.makeText(activity, "Membutuhkan Android 7.0+", Toast.LENGTH_SHORT).show();
-		}
+		// Jalankan game biasa — tekan tombol floating di dalam game untuk PiP
+		Config.startApp(requireActivity(), appItem.getTitle(), appItem.getPathExt(), false);
 	}
 
 	private void requestAddShortcut(AppItem appItem) {
