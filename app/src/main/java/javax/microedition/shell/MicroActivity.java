@@ -46,6 +46,12 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.app.PendingIntent;
+import android.app.RemoteAction;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
+import android.graphics.drawable.Icon;
+import java.util.ArrayList;
 import android.media.AudioManager;
 import android.os.Handler;
 import android.os.Looper;
@@ -221,12 +227,14 @@ public class MicroActivity extends AppCompatActivity {
 	public void onResume() {
 		super.onResume();
 		visible = true;
-		// Jangan resume ulang kalau lagi PiP
-		if (!isInPictureInPictureMode()) {
+		// Jangan resume ulang kalau lagi PiP/floating
+		if (!isFloating && !isInPictureInPictureMode()) {
 			MidletThread.resumeApp();
 		}
+		// Reset isFloating kalau sudah benar-benar keluar PiP
 		if (isFloating && !isInPictureInPictureMode()) {
 			isFloating = false;
+			MidletThread.resumeApp();
 		}
 	}
 
@@ -234,11 +242,21 @@ public class MicroActivity extends AppCompatActivity {
 	public void onPause() {
 		visible = false;
 		hideSoftInput();
-		// Jangan pause game saat masuk PiP — biar tetap jalan di background
-		if (!isInPictureInPictureMode()) {
+		// Jangan pause game saat floating/PiP
+		if (!isFloating && !isInPictureInPictureMode()) {
 			MidletThread.pauseApp();
 		}
 		super.onPause();
+	}
+
+	@Override
+	public void onStop() {
+		// Saat activity di-stop (misal WA VC ambil layar)
+		// game tetap jalan kalau sedang floating
+		if (!isFloating) {
+			MidletThread.pauseApp();
+		}
+		super.onStop();
 	}
 
 	private void hideSoftInput() {
@@ -760,8 +778,65 @@ public class MicroActivity extends AppCompatActivity {
 		}
 	}
 
-	private void doEnterPip() {
-		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+	private static final String ACTION_PIP_RESIZE  = "j2me.pip.resize";
+	private static final String ACTION_PIP_SCREENSHOT = "j2me.pip.screenshot";
+	private static final String ACTION_PIP_CLOSE  = "j2me.pip.close";
+
+	private BroadcastReceiver pipReceiver;
+
+	private void registerPipReceiver() {
+		if (pipReceiver != null) return;
+		pipReceiver = new BroadcastReceiver() {
+			@Override
+			public void onReceive(android.content.Context ctx, Intent intent) {
+				String action = intent.getAction();
+				if (action == null) return;
+				switch (action) {
+					case ACTION_PIP_RESIZE:
+						// Ganti ukuran PiP langsung tanpa keluar
+						pipSize = (pipSize + 1) % 2;
+						updatePipParams();
+						break;
+					case ACTION_PIP_SCREENSHOT:
+						quickScreenshot();
+						break;
+					case ACTION_PIP_CLOSE:
+						isFloating = false;
+						removeBubble();
+						// Restore fullscreen
+						if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+							runOnUiThread(() -> {
+								if (actionBarEnabled) {
+									getSupportActionBar().show();
+									binding.toolbar.setVisibility(View.GONE);
+								}
+							});
+						}
+						moveTaskToBack(false);
+						break;
+				}
+			}
+		};
+		IntentFilter filter = new IntentFilter();
+		filter.addAction(ACTION_PIP_RESIZE);
+		filter.addAction(ACTION_PIP_SCREENSHOT);
+		filter.addAction(ACTION_PIP_CLOSE);
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+			registerReceiver(pipReceiver, filter, RECEIVER_NOT_EXPORTED);
+		} else {
+			registerReceiver(pipReceiver, filter);
+		}
+	}
+
+	private void unregisterPipReceiver() {
+		if (pipReceiver != null) {
+			try { unregisterReceiver(pipReceiver); } catch (Exception ignored) {}
+			pipReceiver = null;
+		}
+	}
+
+	private android.app.PictureInPictureParams buildPipParams() {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null;
 		android.util.Rational ratio;
 		if (pipSize == 1) {
 			ratio = new android.util.Rational(16, 9);
@@ -770,31 +845,103 @@ public class MicroActivity extends AppCompatActivity {
 			int h = binding.displayableContainer.getHeight();
 			ratio = (w > 0 && h > 0) ? new android.util.Rational(w, h) : new android.util.Rational(3, 4);
 		}
-		android.app.PictureInPictureParams pip =
-				new android.app.PictureInPictureParams.Builder()
-						.setAspectRatio(ratio)
-						.build();
-		enterPictureInPictureMode(pip);
-		isFloating = true;
+		android.app.PictureInPictureParams.Builder builder =
+				new android.app.PictureInPictureParams.Builder().setAspectRatio(ratio);
+
+		// Tambah tombol aksi di dalam PiP window (max 3)
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+			ArrayList<RemoteAction> actions = new ArrayList<>();
+
+			// Tombol 1: Resize (kecil/besar)
+			Intent resizeIntent = new Intent(ACTION_PIP_RESIZE);
+			PendingIntent resizePi = PendingIntent.getBroadcast(this, 1, resizeIntent,
+					PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+			actions.add(new RemoteAction(
+					Icon.createWithResource(this, pipSize == 0
+							? android.R.drawable.ic_menu_zoom
+							: android.R.drawable.ic_menu_crop),
+					pipSize == 0 ? "Besar" : "Kecil",
+					pipSize == 0 ? "Perbesar window" : "Perkecil window",
+					resizePi));
+
+			// Tombol 2: Screenshot
+			Intent ssIntent = new Intent(ACTION_PIP_SCREENSHOT);
+			PendingIntent ssPi = PendingIntent.getBroadcast(this, 2, ssIntent,
+					PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+			actions.add(new RemoteAction(
+					Icon.createWithResource(this, android.R.drawable.ic_menu_camera),
+					"Screenshot",
+					"Ambil screenshot game",
+					ssPi));
+
+			// Tombol 3: Tutup / kembali fullscreen
+			Intent closeIntent = new Intent(ACTION_PIP_CLOSE);
+			PendingIntent closePi = PendingIntent.getBroadcast(this, 3, closeIntent,
+					PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+			actions.add(new RemoteAction(
+					Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+					"Fullscreen",
+					"Kembali ke fullscreen",
+					closePi));
+
+			builder.setActions(actions);
+		}
+		return builder.build();
+	}
+
+	private void updatePipParams() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isFloating) {
+			android.app.PictureInPictureParams params = buildPipParams();
+			if (params != null) setPictureInPictureParams(params);
+		}
+	}
+
+	private void doEnterPip() {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+		registerPipReceiver();
+		android.app.PictureInPictureParams params = buildPipParams();
+		if (params != null) {
+			enterPictureInPictureMode(params);
+			isFloating = true;
+		}
 	}
 
 	@Override
 	public void onPictureInPictureModeChanged(boolean isInPiP, Configuration newConfig) {
 		super.onPictureInPictureModeChanged(isInPiP, newConfig);
-		isFloating = isInPiP;
+
 		if (isInPiP) {
+			// Masuk PiP — sembunyikan UI
+			isFloating = true;
 			getSupportActionBar().hide();
 			binding.toolbar.setVisibility(View.GONE);
+			// Lepas audio focus — biar WA VC bebas pakai audio
+			AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+			if (am != null) am.abandonAudioFocus(null);
 			showBubble();
 		} else {
-			if (actionBarEnabled) {
-				getSupportActionBar().show();
-				binding.toolbar.setVisibility(View.VISIBLE);
+			// Keluar dari PiP
+			// Cek apakah ini karena app lain (WA VC) yang minta PiP
+			// atau memang user yang sengaja keluar
+			if (isFloating) {
+				// Kita ditendang keluar PiP oleh app lain
+				// Jangan tampilkan fullscreen — pindah ke background
+				isFloating = false;
+				removeBubble();
+				pipLocked = false;
+				pipPinned = false;
+				// Game tetap jalan, activity ke background
+				moveTaskToBack(true);
+			} else {
+				// User sengaja keluar PiP — restore fullscreen
+				if (actionBarEnabled) {
+					getSupportActionBar().show();
+					binding.toolbar.setVisibility(View.VISIBLE);
+				}
+				removeBubble();
+				pipLocked = false;
+				pipPinned = false;
 			}
-			removeBubble();
-			// Reset lock saat keluar PiP
-			pipLocked = false;
-			pipPinned = false;
 		}
 	}
 
@@ -1089,6 +1236,7 @@ public class MicroActivity extends AppCompatActivity {
 	protected void onDestroy() {
 		removeBubble();
 		removeLockOverlay();
+		unregisterPipReceiver();
 		binding = null;
 		super.onDestroy();
 	}
