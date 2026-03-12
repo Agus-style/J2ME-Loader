@@ -716,12 +716,6 @@ public class MicroActivity extends AppCompatActivity {
 	}
 
 	@Override
-	protected void onDestroy() {
-		binding = null;
-		super.onDestroy();
-	}
-
-	@Override
 	public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
 		super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 		if (requestCode == 1) {
@@ -733,165 +727,74 @@ public class MicroActivity extends AppCompatActivity {
 	}
 
 	// ============================================================
-	// PICTURE IN PICTURE + BUBBLE SYSTEM
+	// FLOATING WINDOW
 	// ============================================================
 
+	private static int floatingInstanceCounter = 0;
+	private int myInstanceId = -1;
+
 	private void toggleFloatingWindow() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			enterPipMode();
-		} else {
-			Toast.makeText(this, "Membutuhkan Android 8.0+", Toast.LENGTH_SHORT).show();
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+				&& !Settings.canDrawOverlays(this)) {
+			Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+					Uri.parse("package:" + getPackageName()));
+			startActivityForResult(intent, 1234);
+			Toast.makeText(this,
+					"Aktifkan 'Display over other apps' untuk floating window",
+					Toast.LENGTH_LONG).show();
+			return;
 		}
+		startFloatingWindow();
 	}
 
-	private void enterPipMode() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			android.app.PictureInPictureParams.Builder pipBuilder =
-					new android.app.PictureInPictureParams.Builder();
-			int w = binding.displayableContainer.getWidth();
-			int h = binding.displayableContainer.getHeight();
-			if (w > 0 && h > 0) {
-				pipBuilder.setAspectRatio(new android.util.Rational(w, h));
+	private void startFloatingWindow() {
+		myInstanceId = floatingInstanceCounter++;
+
+		// Daftarkan callback instance ini
+		final int id = myInstanceId;
+		FloatingGameService.FloatingCallback cb = new FloatingGameService.FloatingCallback() {
+			@Override
+			public ViewGroup getGameView() {
+				return binding != null ? binding.displayableContainer : null;
 			}
-			enterPictureInPictureMode(pipBuilder.build());
-			isFloating = true;
-		}
+
+			@Override
+			public String getAppName() {
+				return appName;
+			}
+
+			@Override
+			public int getInstanceId() {
+				return id;
+			}
+
+			@Override
+			public void onClose() {
+				runOnUiThread(() -> {
+					isFloating = false;
+					finish();
+				});
+			}
+		};
+
+		FloatingGameService.callbacks.add(cb);
+
+		Intent serviceIntent = new Intent(this, FloatingGameService.class)
+				.setAction(FloatingGameService.ACTION_SHOW)
+				.putExtra(FloatingGameService.EXTRA_APP_NAME, appName)
+				.putExtra(FloatingGameService.EXTRA_INSTANCE_ID, myInstanceId);
+		startService(serviceIntent);
+		isFloating = true;
+		moveTaskToBack(true);
 	}
 
 	@Override
-	public void onPictureInPictureModeChanged(boolean isInPiP, Configuration newConfig) {
-		super.onPictureInPictureModeChanged(isInPiP, newConfig);
-		isFloating = isInPiP;
-		if (isInPiP) {
-			// Sembunyikan semua UI saat PiP — hanya game yang tampil
-			getSupportActionBar().hide();
-			binding.toolbar.setVisibility(View.GONE);
-			// Tampilkan bubble minimize di atas PiP window
-			showBubbleOverlay();
-		} else {
-			// Restore UI saat keluar PiP
-			if (actionBarEnabled) {
-				getSupportActionBar().show();
-				binding.toolbar.setVisibility(View.VISIBLE);
-			}
-			removeBubbleOverlay();
+	protected void onDestroy() {
+		// Hapus callback instance ini saat activity destroy
+		if (myInstanceId >= 0) {
+			FloatingGameService.callbacks.removeIf(cb -> cb.getInstanceId() == myInstanceId);
 		}
-	}
-
-	// ---- BUBBLE OVERLAY ----
-	private android.view.WindowManager bubbleWm;
-	private android.view.View bubbleOverlay;
-	private android.view.WindowManager.LayoutParams bubbleParams;
-	private boolean bubbleLocked = false;
-	private int bubbleState = 0; // 0=mini, 1=medium, 2=hidden
-
-	private void showBubbleOverlay() {
-		if (!Settings.canDrawOverlays(this)) return;
-		if (bubbleOverlay != null) return;
-
-		bubbleWm = (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
-		android.widget.FrameLayout bubble = new android.widget.FrameLayout(this);
-
-		// Tombol hitam
-		android.widget.ImageButton btn = new android.widget.ImageButton(this);
-		btn.setBackgroundColor(0xDD000000);
-		btn.setImageResource(android.R.drawable.ic_media_play);
-		btn.setContentDescription("Bubble");
-
-		float density = getResources().getDisplayMetrics().density;
-		int size = (int)(48 * density);
-		bubble.addView(btn, new android.widget.FrameLayout.LayoutParams(size, size));
-		bubbleOverlay = bubble;
-
-		bubbleParams = new android.view.WindowManager.LayoutParams(
-				size, size,
-				Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-						? android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-						: android.view.WindowManager.LayoutParams.TYPE_PHONE,
-				android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-				android.graphics.PixelFormat.TRANSLUCENT
-		);
-		bubbleParams.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
-		bubbleParams.x = 0;
-		bubbleParams.y = 400;
-
-		bubbleWm.addView(bubbleOverlay, bubbleParams);
-
-		// Tap → ganti state: hidden → mini → medium → fullscreen
-		btn.setOnClickListener(v -> {
-			bubbleState = (bubbleState + 1) % 3;
-			switch (bubbleState) {
-				case 0: // mini — PiP kecil
-					enterPipMode();
-					break;
-				case 1: // medium — PiP agak besar
-					if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-						android.app.PictureInPictureParams.Builder pb =
-								new android.app.PictureInPictureParams.Builder();
-						pb.setAspectRatio(new android.util.Rational(16, 9));
-						enterPictureInPictureMode(pb.build());
-					}
-					break;
-				case 2: // fullscreen — keluar PiP
-					if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-						// Pindah ke foreground
-						Intent bring = new Intent(this, MicroActivity.class);
-						bring.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-						startActivity(bring);
-					}
-					break;
-			}
-		});
-
-		// Tombol lock — tahan untuk lock/unlock posisi
-		btn.setOnLongClickListener(v -> {
-			bubbleLocked = !bubbleLocked;
-			btn.setAlpha(bubbleLocked ? 0.5f : 1.0f);
-			Toast.makeText(this,
-					bubbleLocked ? "Posisi terkunci" : "Posisi bebas",
-					Toast.LENGTH_SHORT).show();
-			return true;
-		});
-
-		// Drag bubble
-		btn.setOnTouchListener(new View.OnTouchListener() {
-			int initX, initY;
-			float touchX, touchY;
-			long downTime;
-
-			@Override
-			public boolean onTouch(View v, android.view.MotionEvent e) {
-				if (bubbleLocked) return false;
-				switch (e.getAction()) {
-					case android.view.MotionEvent.ACTION_DOWN:
-						initX = bubbleParams.x;
-						initY = bubbleParams.y;
-						touchX = e.getRawX();
-						touchY = e.getRawY();
-						downTime = System.currentTimeMillis();
-						return false; // biar onClick juga jalan
-					case android.view.MotionEvent.ACTION_MOVE:
-						float dx = e.getRawX() - touchX;
-						float dy = e.getRawY() - touchY;
-						if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
-							bubbleParams.x = initX + (int) dx;
-							bubbleParams.y = initY + (int) dy;
-							if (bubbleOverlay != null)
-								bubbleWm.updateViewLayout(bubbleOverlay, bubbleParams);
-						}
-						return true;
-				}
-				return false;
-			}
-		});
-	}
-
-	private void removeBubbleOverlay() {
-		if (bubbleOverlay != null && bubbleWm != null) {
-			try {
-				bubbleWm.removeView(bubbleOverlay);
-			} catch (Exception ignored) {}
-			bubbleOverlay = null;
-		}
+		binding = null;
+		super.onDestroy();
 	}
 }

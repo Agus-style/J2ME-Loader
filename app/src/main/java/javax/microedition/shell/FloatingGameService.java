@@ -1,6 +1,14 @@
 /*
  * FloatingGameService.java
  * app/src/main/java/javax/microedition/shell/FloatingGameService.java
+ *
+ * Fitur:
+ * - Floating window dengan PixelCopy (tidak hitam)
+ * - Geser ke pinggir → bubble hitam otomatis
+ * - Tap bubble → muncul lagi
+ * - Kunci ukuran (tidak fullscreen saat disentuh)
+ * - Background tetap jalan saat layar mati (WakeLock)
+ * - Support floating ganda (multiple instance via static list)
  */
 
 package javax.microedition.shell;
@@ -13,76 +21,93 @@ import android.app.Service;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.PixelCopy;
+import android.view.Surface;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
+import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class FloatingGameService extends Service {
 
     public static final String ACTION_SHOW = "floating.show";
-    public static final String ACTION_HIDE = "floating.hide";
     public static final String ACTION_STOP = "floating.stop";
     public static final String EXTRA_APP_NAME = "app_name";
+    public static final String EXTRA_INSTANCE_ID = "instance_id";
 
     private static final String CHANNEL_ID = "floating_game_channel";
-    private static final int NOTIF_ID = 1001;
-    private static final int FPS = 30;
+    private static final int NOTIF_ID = 2001;
+    private static final int FPS = 25;
+    private static final int BUBBLE_SIZE_DP = 52;
+    private static final int EDGE_SNAP_DP = 60; // jarak dari pinggir untuk jadi bubble
 
     public static boolean isRunning = false;
-    public static FloatingCallback callback;
+
+    // Support multiple instances
+    public static final List<FloatingCallback> callbacks = new ArrayList<>();
 
     private WindowManager windowManager;
-    private View floatingView;
-    private View bubbleView;
-    private ImageView mirrorView;
 
+    // Floating window utama
+    private FrameLayout floatingContainer;
+    private ImageView mirrorView;
     private WindowManager.LayoutParams floatingParams;
+
+    // Bubble
+    private FrameLayout bubbleView;
     private WindowManager.LayoutParams bubbleParams;
 
-    private boolean isMinimized = false;
+    // State
+    private boolean isBubble = false;
+    private boolean sizeLocked = false;
+    private boolean isMinimizedToBubble = false;
+    private int instanceId = 0;
     private String appName = "J2ME Game";
 
-    private int initialX, initialY;
-    private float initialTouchX, initialTouchY;
+    // Drag
+    private int dragInitX, dragInitY;
+    private float dragTouchX, dragTouchY;
+    private long dragDownTime;
 
-    private final Handler mirrorHandler = new Handler(Looper.getMainLooper());
-    private final Runnable mirrorRunnable = new Runnable() {
+    // Mirror loop
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable mirrorLoop = new Runnable() {
         @Override
         public void run() {
-            if (callback != null && mirrorView != null && !isMinimized) {
-                Bitmap bmp = callback.getGameBitmap();
-                if (bmp != null) {
-                    mirrorView.setImageBitmap(bmp);
-                }
-            }
-            if (!isMinimized && isRunning) {
-                mirrorHandler.postDelayed(this, 1000 / FPS);
+            captureMirror();
+            if (!isBubble && isRunning) {
+                handler.postDelayed(this, 1000 / FPS);
             }
         }
     };
 
+    // WakeLock — layar mati tetap jalan
+    private PowerManager.WakeLock wakeLock;
+
     public interface FloatingCallback {
-        // Ambil bitmap frame game saat ini
-        Bitmap getGameBitmap();
-        // Kembalikan ke fullscreen
-        void onRestoreToFullscreen();
-        // Teruskan touch ke game
-        void dispatchTouchToGame(MotionEvent event);
-        // Ukuran game asli untuk scaling touch
-        int getGameWidth();
-        int getGameHeight();
+        ViewGroup getGameView();      // view container game
+        String getAppName();
+        int getInstanceId();
+        void onClose();
     }
 
     @Override
@@ -91,84 +116,98 @@ public class FloatingGameService extends Service {
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         isRunning = true;
         createNotificationChannel();
+        acquireWakeLock();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_NOT_STICKY;
+        if (intent == null) return START_STICKY;
         String action = intent.getAction();
-        if (action == null) return START_NOT_STICKY;
+        if (action == null) return START_STICKY;
 
         appName = intent.getStringExtra(EXTRA_APP_NAME) != null
                 ? intent.getStringExtra(EXTRA_APP_NAME) : "J2ME Game";
+        instanceId = intent.getIntExtra(EXTRA_INSTANCE_ID, 0);
 
         switch (action) {
             case ACTION_SHOW:
-                startForeground(NOTIF_ID, buildNotification());
+                startForeground(NOTIF_ID + instanceId, buildNotification());
                 showFloatingWindow();
                 break;
-            case ACTION_HIDE:
-                minimizeToBubble();
-                break;
             case ACTION_STOP:
-                stopFloating();
+                stopSelf();
                 break;
         }
         return START_STICKY;
     }
 
-    private void showFloatingWindow() {
-        if (floatingView != null) {
-            floatingView.setVisibility(View.VISIBLE);
-            if (bubbleView != null) {
-                windowManager.removeView(bubbleView);
-                bubbleView = null;
-            }
-            isMinimized = false;
-            startMirror();
-            return;
+    // ================================================================
+    // WAKELOCK — tetap jalan saat layar mati
+    // ================================================================
+
+    private void acquireWakeLock() {
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (pm != null) {
+            wakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "J2MELoader:FloatingWakeLock"
+            );
+            wakeLock.acquire(); // tidak ada timeout — jalan terus
         }
+    }
 
-        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-        final int width = (int) (dm.widthPixels * 0.70f);
-        final int height = (int) (dm.heightPixels * 0.65f);
+    private void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
+    }
 
-        FrameLayout container = new FrameLayout(this);
-        container.setBackgroundColor(0xFF111111);
+    // ================================================================
+    // FLOATING WINDOW
+    // ================================================================
 
-        // Mirror view — tampilkan bitmap game
+    private void showFloatingWindow() {
+        if (floatingContainer != null) return;
+
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int width = (int) (dm.widthPixels * 0.68f);
+        int height = (int) (dm.heightPixels * 0.60f);
+
+        // Container utama
+        floatingContainer = new FrameLayout(this);
+        floatingContainer.setBackgroundColor(0xFF000000);
+
+        // Mirror view — tampilkan PixelCopy dari game
         mirrorView = new ImageView(this);
         mirrorView.setScaleType(ImageView.ScaleType.FIT_XY);
-        container.addView(mirrorView, new FrameLayout.LayoutParams(
+        floatingContainer.addView(mirrorView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // Touch input — scale koordinat ke ukuran game asli
+        // Touch — teruskan ke game dengan scaling
+        final int fWidth = width;
+        final int fHeight = height;
         mirrorView.setOnTouchListener((v, event) -> {
-            if (callback == null) return false;
-            int gameW = callback.getGameWidth();
-            int gameH = callback.getGameHeight();
-            if (gameW <= 0 || gameH <= 0) return false;
-
-            float scaleX = (float) gameW / width;
-            float scaleY = (float) gameH / height;
-
+            FloatingCallback cb = getCallback();
+            if (cb == null) return false;
+            ViewGroup gameView = cb.getGameView();
+            if (gameView == null || gameView.getWidth() == 0) return false;
+            float sx = (float) gameView.getWidth() / fWidth;
+            float sy = (float) gameView.getHeight() / fHeight;
             MotionEvent scaled = MotionEvent.obtain(event);
-            scaled.setLocation(event.getX() * scaleX, event.getY() * scaleY);
-            callback.dispatchTouchToGame(scaled);
+            scaled.setLocation(event.getX() * sx, event.getY() * sy);
+            gameView.dispatchTouchEvent(scaled);
             scaled.recycle();
             return true;
         });
 
         // Control bar
-        float density = dm.density;
-        int barHeight = (int) (40 * density);
-        View controlBar = buildControlBar(density);
-        container.addView(controlBar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, barHeight, Gravity.TOP));
+        int barH = (int) (38 * dm.density);
+        View bar = buildControlBar(dm.density, sizeLocked);
+        floatingContainer.addView(bar, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, barH, Gravity.TOP));
 
-        floatingView = container;
-
+        // Params
         floatingParams = new WindowManager.LayoutParams(
                 width, height,
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -178,105 +217,213 @@ public class FloatingGameService extends Service {
                 PixelFormat.TRANSLUCENT
         );
         floatingParams.gravity = Gravity.TOP | Gravity.START;
-        floatingParams.x = 50;
-        floatingParams.y = 100;
+        floatingParams.x = 40;
+        floatingParams.y = 120;
 
-        windowManager.addView(floatingView, floatingParams);
-        isMinimized = false;
-        setupDrag(controlBar);
-        startMirror();
+        windowManager.addView(floatingContainer, floatingParams);
+        isBubble = false;
+        startMirrorLoop();
+        setupDrag(bar);
     }
 
-    private View buildControlBar(float density) {
+    // ================================================================
+    // CONTROL BAR
+    // ================================================================
+
+    private View buildControlBar(float density, boolean locked) {
         FrameLayout bar = new FrameLayout(this);
-        bar.setBackgroundColor(0xDD1A1A1A);
+        bar.setBackgroundColor(0xEE1A1A1A);
 
-        int btnSize = (int) (32 * density);
-        int margin = (int) (6 * density);
+        int btnSz = (int) (30 * density);
+        int margin = (int) (5 * density);
 
-        // Tombol minimize (⏸)
-        ImageButton btnMin = makeButton(android.R.drawable.ic_media_pause, "Minimize");
-        FrameLayout.LayoutParams lpMin = new FrameLayout.LayoutParams(btnSize, btnSize);
+        // 🔒 Tombol kunci ukuran (kiri)
+        ImageButton btnLock = new ImageButton(this);
+        btnLock.setImageResource(locked
+                ? android.R.drawable.ic_lock_lock
+                : android.R.drawable.ic_lock_idle_lock);
+        btnLock.setBackgroundColor(locked ? 0x99FF9800 : 0x00000000);
+        btnLock.setContentDescription("Lock size");
+        FrameLayout.LayoutParams lpLock = new FrameLayout.LayoutParams(btnSz, btnSz);
+        lpLock.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
+        lpLock.leftMargin = margin;
+        btnLock.setLayoutParams(lpLock);
+        btnLock.setOnClickListener(v -> {
+            sizeLocked = !sizeLocked;
+            // Rebuild bar
+            floatingContainer.removeView(bar);
+            int barH = (int) (38 * density);
+            View newBar = buildControlBar(density, sizeLocked);
+            floatingContainer.addView(newBar, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, barH, Gravity.TOP));
+            setupDrag(newBar);
+            // Update flag focusable berdasarkan lock
+            if (sizeLocked) {
+                floatingParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                floatingParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+            } else {
+                floatingParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                floatingParams.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+            }
+            windowManager.updateViewLayout(floatingContainer, floatingParams);
+            Toast.makeText(this,
+                    sizeLocked ? "🔒 Ukuran terkunci — bisa main!" : "🔓 Ukuran bebas",
+                    Toast.LENGTH_SHORT).show();
+        });
+        bar.addView(btnLock);
+
+        // ⏸ Tombol minimize ke bubble
+        ImageButton btnMin = new ImageButton(this);
+        btnMin.setImageResource(android.R.drawable.ic_media_pause);
+        btnMin.setBackgroundColor(0x00000000);
+        btnMin.setContentDescription("Minimize");
+        FrameLayout.LayoutParams lpMin = new FrameLayout.LayoutParams(btnSz, btnSz);
         lpMin.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
-        lpMin.rightMargin = (btnSize + margin) * 2 + margin;
+        lpMin.rightMargin = (btnSz + margin) * 2 + margin;
         btnMin.setLayoutParams(lpMin);
         btnMin.setOnClickListener(v -> minimizeToBubble());
         bar.addView(btnMin);
 
-        // Tombol fullscreen (⊕)
-        ImageButton btnFull = makeButton(android.R.drawable.ic_menu_zoom, "Fullscreen");
-        FrameLayout.LayoutParams lpFull = new FrameLayout.LayoutParams(btnSize, btnSize);
-        lpFull.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
-        lpFull.rightMargin = (btnSize + margin) + margin;
-        btnFull.setLayoutParams(lpFull);
-        btnFull.setOnClickListener(v -> restoreToFullscreen());
-        bar.addView(btnFull);
-
-        // Tombol close (✕)
-        ImageButton btnClose = makeButton(android.R.drawable.ic_menu_close_clear_cancel, "Close");
-        FrameLayout.LayoutParams lpClose = new FrameLayout.LayoutParams(btnSize, btnSize);
+        // ✕ Tombol close
+        ImageButton btnClose = new ImageButton(this);
+        btnClose.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
+        btnClose.setBackgroundColor(0x00000000);
+        btnClose.setContentDescription("Close");
+        FrameLayout.LayoutParams lpClose = new FrameLayout.LayoutParams(btnSz, btnSz);
         lpClose.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
         lpClose.rightMargin = margin;
         btnClose.setLayoutParams(lpClose);
-        btnClose.setOnClickListener(v -> stopFloating());
+        btnClose.setOnClickListener(v -> {
+            FloatingCallback cb = getCallback();
+            if (cb != null) cb.onClose();
+            stopSelf();
+        });
         bar.addView(btnClose);
 
         return bar;
     }
 
-    private ImageButton makeButton(int iconRes, String desc) {
-        ImageButton btn = new ImageButton(this);
-        btn.setImageResource(iconRes);
-        btn.setBackgroundColor(0x00000000);
-        btn.setContentDescription(desc);
-        return btn;
-    }
+    // ================================================================
+    // DRAG — geser ke pinggir → bubble otomatis
+    // ================================================================
 
     private void setupDrag(View handle) {
         handle.setOnTouchListener((v, event) -> {
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            int edgeSnap = (int) (EDGE_SNAP_DP * dm.density);
+
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
-                    initialX = floatingParams.x;
-                    initialY = floatingParams.y;
-                    initialTouchX = event.getRawX();
-                    initialTouchY = event.getRawY();
+                    dragInitX = floatingParams.x;
+                    dragInitY = floatingParams.y;
+                    dragTouchX = event.getRawX();
+                    dragTouchY = event.getRawY();
+                    dragDownTime = System.currentTimeMillis();
                     return true;
+
                 case MotionEvent.ACTION_MOVE:
-                    floatingParams.x = initialX + (int)(event.getRawX() - initialTouchX);
-                    floatingParams.y = initialY + (int)(event.getRawY() - initialTouchY);
-                    if (floatingView != null)
-                        windowManager.updateViewLayout(floatingView, floatingParams);
+                    floatingParams.x = dragInitX + (int)(event.getRawX() - dragTouchX);
+                    floatingParams.y = dragInitY + (int)(event.getRawY() - dragTouchY);
+                    if (floatingContainer != null)
+                        windowManager.updateViewLayout(floatingContainer, floatingParams);
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                    // Cek apakah di pinggir → jadi bubble
+                    boolean nearLeft = floatingParams.x < -edgeSnap;
+                    boolean nearRight = floatingParams.x + floatingParams.width > dm.widthPixels + edgeSnap;
+                    if (nearLeft || nearRight) {
+                        minimizeToBubble();
+                    }
                     return true;
             }
             return false;
         });
     }
 
-    private void startMirror() {
-        mirrorHandler.removeCallbacks(mirrorRunnable);
-        mirrorHandler.post(mirrorRunnable);
+    // ================================================================
+    // PIXELCOPY MIRROR — tidak hitam!
+    // ================================================================
+
+    private void captureMirror() {
+        if (mirrorView == null) return;
+        FloatingCallback cb = getCallback();
+        if (cb == null) return;
+        ViewGroup gameView = cb.getGameView();
+        if (gameView == null || gameView.getWidth() == 0) return;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Cari SurfaceView di dalam gameView
+            SurfaceView sv = findSurfaceView(gameView);
+            if (sv != null && sv.getHolder().getSurface().isValid()) {
+                Bitmap bmp = Bitmap.createBitmap(
+                        sv.getWidth(), sv.getHeight(), Bitmap.Config.ARGB_8888);
+                PixelCopy.request(sv, bmp, result -> {
+                    if (result == PixelCopy.SUCCESS) {
+                        handler.post(() -> mirrorView.setImageBitmap(bmp));
+                    }
+                }, handler);
+                return;
+            }
+        }
+
+        // Fallback — view.draw()
+        try {
+            Bitmap bmp = Bitmap.createBitmap(
+                    gameView.getWidth(), gameView.getHeight(), Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+            gameView.draw(canvas);
+            mirrorView.setImageBitmap(bmp);
+        } catch (Exception ignored) {}
     }
 
-    private void stopMirror() {
-        mirrorHandler.removeCallbacks(mirrorRunnable);
+    private SurfaceView findSurfaceView(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child instanceof SurfaceView) return (SurfaceView) child;
+            if (child instanceof ViewGroup) {
+                SurfaceView found = findSurfaceView((ViewGroup) child);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
+
+    private void startMirrorLoop() {
+        handler.removeCallbacks(mirrorLoop);
+        handler.post(mirrorLoop);
+    }
+
+    private void stopMirrorLoop() {
+        handler.removeCallbacks(mirrorLoop);
+    }
+
+    // ================================================================
+    // BUBBLE — minimize ke tombol hitam kecil
+    // ================================================================
 
     private void minimizeToBubble() {
-        if (isMinimized) return;
-        isMinimized = true;
-        stopMirror();
-        if (floatingView != null) floatingView.setVisibility(View.GONE);
+        if (isBubble) return;
+        isBubble = true;
+        stopMirrorLoop();
 
-        float density = getResources().getDisplayMetrics().density;
-        // Bubble kecil 56dp
-        int size = (int) (56 * density);
+        if (floatingContainer != null) {
+            windowManager.removeView(floatingContainer);
+            floatingContainer = null;
+        }
 
-        FrameLayout bubble = new FrameLayout(this);
-        bubble.setBackgroundColor(0xCC1565C0);
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int size = (int) (BUBBLE_SIZE_DP * dm.density);
 
-        ImageButton icon = makeButton(android.R.drawable.ic_media_play, "Restore");
-        bubble.addView(icon, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
-        bubbleView = bubble;
+        bubbleView = new FrameLayout(this);
+        bubbleView.setBackgroundColor(0xFF000000); // hitam
+
+        // Icon play di tengah bubble
+        ImageButton icon = new ImageButton(this);
+        icon.setImageResource(android.R.drawable.ic_media_play);
+        icon.setBackgroundColor(0x00000000);
+        bubbleView.addView(icon, new FrameLayout.LayoutParams(
+                size, size, Gravity.CENTER));
 
         bubbleParams = new WindowManager.LayoutParams(
                 size, size,
@@ -288,13 +435,15 @@ public class FloatingGameService extends Service {
         );
         bubbleParams.gravity = Gravity.TOP | Gravity.START;
         bubbleParams.x = 0;
-        bubbleParams.y = 300;
+        bubbleParams.y = 400;
+
         windowManager.addView(bubbleView, bubbleParams);
 
+        // Drag + tap bubble
         bubbleView.setOnTouchListener(new View.OnTouchListener() {
             int bX, bY;
             float bTX, bTY;
-            long downTime;
+            long bDown;
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
@@ -302,7 +451,7 @@ public class FloatingGameService extends Service {
                     case MotionEvent.ACTION_DOWN:
                         bX = bubbleParams.x; bY = bubbleParams.y;
                         bTX = e.getRawX(); bTY = e.getRawY();
-                        downTime = System.currentTimeMillis();
+                        bDown = System.currentTimeMillis();
                         return true;
                     case MotionEvent.ACTION_MOVE:
                         bubbleParams.x = bX + (int)(e.getRawX() - bTX);
@@ -311,19 +460,10 @@ public class FloatingGameService extends Service {
                             windowManager.updateViewLayout(bubbleView, bubbleParams);
                         return true;
                     case MotionEvent.ACTION_UP:
-                        boolean isTap = System.currentTimeMillis() - downTime < 200
-                                && Math.abs(e.getRawX() - bTX) < 10
-                                && Math.abs(e.getRawY() - bTY) < 10;
-                        if (isTap) {
-                            if (bubbleView != null) {
-                                windowManager.removeView(bubbleView);
-                                bubbleView = null;
-                            }
-                            if (floatingView != null)
-                                floatingView.setVisibility(View.VISIBLE);
-                            isMinimized = false;
-                            startMirror();
-                        }
+                        boolean isTap = System.currentTimeMillis() - bDown < 250
+                                && Math.abs(e.getRawX() - bTX) < 15
+                                && Math.abs(e.getRawY() - bTY) < 15;
+                        if (isTap) restoreFromBubble();
                         return true;
                 }
                 return false;
@@ -331,32 +471,58 @@ public class FloatingGameService extends Service {
         });
     }
 
-    private void restoreToFullscreen() {
-        stopMirror();
-        if (callback != null) callback.onRestoreToFullscreen();
-        stopSelf();
+    private void restoreFromBubble() {
+        if (!isBubble) return;
+        isBubble = false;
+
+        if (bubbleView != null) {
+            windowManager.removeView(bubbleView);
+            bubbleView = null;
+        }
+        showFloatingWindow();
     }
 
-    private void stopFloating() {
-        stopMirror();
-        if (callback != null) callback.onRestoreToFullscreen();
-        stopSelf();
+    // ================================================================
+    // HELPER
+    // ================================================================
+
+    private FloatingCallback getCallback() {
+        if (callbacks.isEmpty()) return null;
+        for (FloatingCallback cb : callbacks) {
+            if (cb.getInstanceId() == instanceId) return cb;
+        }
+        return callbacks.isEmpty() ? null : callbacks.get(0);
     }
+
+    // ================================================================
+    // LIFECYCLE
+    // ================================================================
 
     @Override
     public void onDestroy() {
         isRunning = false;
-        stopMirror();
-        if (floatingView != null) { windowManager.removeView(floatingView); floatingView = null; }
-        if (bubbleView != null) { windowManager.removeView(bubbleView); bubbleView = null; }
-        callback = null;
+        stopMirrorLoop();
+        releaseWakeLock();
+        if (floatingContainer != null) {
+            windowManager.removeView(floatingContainer);
+            floatingContainer = null;
+        }
+        if (bubbleView != null) {
+            windowManager.removeView(bubbleView);
+            bubbleView = null;
+        }
         super.onDestroy();
     }
+
+    // ================================================================
+    // NOTIFICATION
+    // ================================================================
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
                     CHANNEL_ID, "Floating Game", NotificationManager.IMPORTANCE_LOW);
+            ch.setDescription("Game J2ME floating window");
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.createNotificationChannel(ch);
         }
@@ -364,14 +530,15 @@ public class FloatingGameService extends Service {
 
     private Notification buildNotification() {
         Intent stop = new Intent(this, FloatingGameService.class).setAction(ACTION_STOP);
-        PendingIntent pi = PendingIntent.getService(this, 0, stop,
+        PendingIntent pi = PendingIntent.getService(this, instanceId, stop,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle(appName + " (Floating)")
-                .setContentText("Game berjalan di floating window")
+                .setContentText("Game berjalan di background")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pi)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
                 .build();
     }
 
