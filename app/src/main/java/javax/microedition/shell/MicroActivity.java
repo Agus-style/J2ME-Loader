@@ -733,82 +733,41 @@ public class MicroActivity extends AppCompatActivity {
 	}
 
 	// ============================================================
-	// FLOATING WINDOW METHODS
+	// PICTURE IN PICTURE (PiP)
 	// ============================================================
 
 	private void toggleFloatingWindow() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-				&& !Settings.canDrawOverlays(this)) {
-			Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-					Uri.parse("package:" + getPackageName()));
-			startActivityForResult(intent, 1234);
-			Toast.makeText(this,
-					"Aktifkan 'Display over other apps' untuk fitur ini",
-					Toast.LENGTH_LONG).show();
-			return;
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+			android.app.PictureInPictureParams.Builder pipBuilder =
+					new android.app.PictureInPictureParams.Builder();
+			// Set rasio layar game
+			int w = binding.displayableContainer.getWidth();
+			int h = binding.displayableContainer.getHeight();
+			if (w > 0 && h > 0) {
+				android.util.Rational ratio = new android.util.Rational(w, h);
+				pipBuilder.setAspectRatio(ratio);
+			}
+			enterPictureInPictureMode(pipBuilder.build());
+			isFloating = true;
+		} else {
+			Toast.makeText(this, "PiP membutuhkan Android 8.0+", Toast.LENGTH_SHORT).show();
 		}
-		startFloatingWindow();
 	}
 
-	private void startFloatingWindow() {
-		FloatingGameService.callback = new FloatingGameService.FloatingCallback() {
-			@Override
-			public android.graphics.Bitmap getGameBitmap() {
-				// Ambil bitmap dari Canvas game J2ME
-				Displayable current = getCurrent();
-				if (current instanceof javax.microedition.lcdui.Canvas) {
-					javax.microedition.lcdui.Canvas canvas = (javax.microedition.lcdui.Canvas) current;
-					final android.graphics.Bitmap[] result = {null};
-					final Object lock = new Object();
-					canvas.getScreenShot()
-							.subscribeOn(io.reactivex.schedulers.Schedulers.io())
-							.subscribe(
-									bmp -> {
-										synchronized (lock) {
-											result[0] = bmp;
-											lock.notifyAll();
-										}
-									},
-									err -> {
-										synchronized (lock) {
-											lock.notifyAll();
-										}
-									}
-							);
-					synchronized (lock) {
-						try { lock.wait(100); } catch (InterruptedException ignored) {}
-					}
-					return result[0];
-				}
-				return null;
+	@Override
+	public void onPictureInPictureModeChanged(boolean isInPiP, Configuration newConfig) {
+		super.onPictureInPictureModeChanged(isInPiP, newConfig);
+		isFloating = isInPiP;
+		if (isInPiP) {
+			// Sembunyikan toolbar saat PiP
+			getSupportActionBar().hide();
+			binding.toolbar.setVisibility(View.GONE);
+		} else {
+			// Restore toolbar saat keluar PiP
+			if (actionBarEnabled) {
+				getSupportActionBar().show();
+				binding.toolbar.setVisibility(View.VISIBLE);
 			}
-
-			@Override
-			public void onRestoreToFullscreen() {
-				runOnUiThread(() -> isFloating = false);
-			}
-
-			@Override
-			public void dispatchTouchToGame(android.view.MotionEvent event) {
-				runOnUiThread(() -> binding.displayableContainer.dispatchTouchEvent(event));
-			}
-
-			@Override
-			public int getGameWidth() {
-				return binding.displayableContainer.getWidth();
-			}
-
-			@Override
-			public int getGameHeight() {
-				return binding.displayableContainer.getHeight();
-			}
-		};
-
-		Intent serviceIntent = new Intent(this, FloatingGameService.class)
-				.setAction(FloatingGameService.ACTION_SHOW)
-				.putExtra(FloatingGameService.EXTRA_APP_NAME, appName);
-		startService(serviceIntent);
-		isFloating = true;
-		moveTaskToBack(true);
+		}
 	}
 }
