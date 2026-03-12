@@ -30,6 +30,7 @@ import android.content.res.Configuration;
 import android.content.res.TypedArray;
 import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -122,6 +123,12 @@ public class MicroActivity extends AppCompatActivity {
 
 	// ---- FLOATING WINDOW FIELD ----
 	private boolean isFloating = false;
+	// FPS asli user — disimpan saat masuk background
+	private int userFpsLimit = 0;
+	// Flag background running
+	private boolean backgroundRunning = false;
+	// WakeLock — game tetap jalan saat layar mati
+	private PowerManager.WakeLock wakeLock;
 	private boolean pipPinned = false;       // Pin window - tidak bisa digeser
 	private boolean pipLocked = false;       // Kunci layar - cegah sentuhan
 	private boolean bubbleAutoHide = true;   // Auto hide bubble
@@ -136,6 +143,12 @@ public class MicroActivity extends AppCompatActivity {
 		binding = ActivityMicroBinding.inflate(getLayoutInflater());
 		View view = binding.getRoot();
 		setContentView(view);
+		// WakeLock — game tetap jalan walaupun layar mati
+		PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+		if (pm != null) {
+			wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "J2MELoader:GameRunning");
+			wakeLock.acquire();
+		}
 		setSupportActionBar(binding.toolbar);
 
 		SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
@@ -228,15 +241,28 @@ public class MicroActivity extends AppCompatActivity {
 		super.onResume();
 		visible = true;
 		MidletThread.resumeApp();
+		// Restore FPS normal saat kembali foreground
+		if (backgroundRunning && microLoader != null) {
+			// 0 = unlimited (default)
+			microLoader.setLimitFps(0);
+			backgroundRunning = false;
+		}
 	}
 
 	@Override
 	public void onPause() {
 		visible = false;
 		hideSoftInput();
-		// Hanya pause kalau bukan sedang PiP
-		if (!isInPictureInPictureMode()) {
-			MidletThread.pauseApp();
+		if (isInPictureInPictureMode()) {
+			// Lagi PiP — tidak pause, biarkan jalan
+		} else {
+			// Game tetap jalan di background tapi FPS diturunkan biar tidak panas
+			if (microLoader != null) {
+				// Turunkan ke 5fps di background — cukup untuk jalan, tidak panas
+				microLoader.setLimitFps(5);
+				backgroundRunning = true;
+			}
+			// TIDAK pause game — biarkan jalan di background
 		}
 		super.onPause();
 	}
@@ -752,38 +778,12 @@ public class MicroActivity extends AppCompatActivity {
 
 	// ---- TOGGLE FLOATING ----
 	private void toggleFloatingWindow() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-				&& !Settings.canDrawOverlays(this)) {
-			startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-					Uri.parse("package:" + getPackageName())));
-			Toast.makeText(this, "Aktifkan 'Display over other apps' lalu coba lagi", Toast.LENGTH_LONG).show();
-			return;
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+			pipSize = 0;
+			doEnterPip();
+		} else {
+			Toast.makeText(this, "Butuh Android 8.0+", Toast.LENGTH_SHORT).show();
 		}
-		if (GameOverlayService.isRunning) {
-			// Stop overlay — kembali normal
-			stopService(new Intent(this, GameOverlayService.class));
-			isFloating = false;
-			return;
-		}
-		// Daftarkan callback
-		GameOverlayService.callback = new GameOverlayService.OverlayCallback() {
-			@Override
-			public javax.microedition.lcdui.Canvas getCurrentCanvas() {
-				if (current instanceof javax.microedition.lcdui.Canvas) {
-					return (javax.microedition.lcdui.Canvas) current;
-				}
-				return null;
-			}
-			@Override
-			public void onOverlayClosed() {
-				runOnUiThread(() -> isFloating = false);
-			}
-		};
-		Intent svc = new Intent(this, GameOverlayService.class).setAction(GameOverlayService.ACTION_SHOW);
-		startService(svc);
-		isFloating = true;
-		// Pindah ke background — overlay tampil di atas semua app
-		moveTaskToBack(true);
 	}
 
 	private static final String ACTION_PIP_RESIZE  = "j2me.pip.resize";
@@ -1234,6 +1234,10 @@ public class MicroActivity extends AppCompatActivity {
 		removeBubble();
 		removeLockOverlay();
 		unregisterPipReceiver();
+		// Lepas WakeLock saat game selesai
+		if (wakeLock != null && wakeLock.isHeld()) {
+			wakeLock.release();
+		}
 		binding = null;
 		super.onDestroy();
 	}
