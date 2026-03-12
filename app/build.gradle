@@ -48,7 +48,6 @@ android {
             signingConfig signingConfigs.release
         }
         debug {
-            applicationIdSuffix '.debug'
             jniDebuggable true
             multiDexEnabled true
             multiDexKeepProguard file('multidex-config.pro')
