@@ -227,36 +227,18 @@ public class MicroActivity extends AppCompatActivity {
 	public void onResume() {
 		super.onResume();
 		visible = true;
-		// Jangan resume ulang kalau lagi PiP/floating
-		if (!isFloating && !isInPictureInPictureMode()) {
-			MidletThread.resumeApp();
-		}
-		// Reset isFloating kalau sudah benar-benar keluar PiP
-		if (isFloating && !isInPictureInPictureMode()) {
-			isFloating = false;
-			MidletThread.resumeApp();
-		}
+		MidletThread.resumeApp();
 	}
 
 	@Override
 	public void onPause() {
 		visible = false;
 		hideSoftInput();
-		// Jangan pause game saat floating/PiP
-		if (!isFloating && !isInPictureInPictureMode()) {
+		// Hanya pause kalau bukan sedang PiP
+		if (!isInPictureInPictureMode()) {
 			MidletThread.pauseApp();
 		}
 		super.onPause();
-	}
-
-	@Override
-	public void onStop() {
-		// Saat activity di-stop (misal WA VC ambil layar)
-		// game tetap jalan kalau sedang floating
-		if (!isFloating) {
-			MidletThread.pauseApp();
-		}
-		super.onStop();
 	}
 
 	private void hideSoftInput() {
@@ -770,12 +752,38 @@ public class MicroActivity extends AppCompatActivity {
 
 	// ---- TOGGLE FLOATING ----
 	private void toggleFloatingWindow() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			pipSize = 0;
-			doEnterPip();
-		} else {
-			Toast.makeText(this, "Butuh Android 8.0+", Toast.LENGTH_SHORT).show();
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+				&& !Settings.canDrawOverlays(this)) {
+			startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+					Uri.parse("package:" + getPackageName())));
+			Toast.makeText(this, "Aktifkan 'Display over other apps' lalu coba lagi", Toast.LENGTH_LONG).show();
+			return;
 		}
+		if (GameOverlayService.isRunning) {
+			// Stop overlay — kembali normal
+			stopService(new Intent(this, GameOverlayService.class));
+			isFloating = false;
+			return;
+		}
+		// Daftarkan callback
+		GameOverlayService.callback = new GameOverlayService.OverlayCallback() {
+			@Override
+			public javax.microedition.lcdui.Canvas getCurrentCanvas() {
+				if (current instanceof javax.microedition.lcdui.Canvas) {
+					return (javax.microedition.lcdui.Canvas) current;
+				}
+				return null;
+			}
+			@Override
+			public void onOverlayClosed() {
+				runOnUiThread(() -> isFloating = false);
+			}
+		};
+		Intent svc = new Intent(this, GameOverlayService.class).setAction(GameOverlayService.ACTION_SHOW);
+		startService(svc);
+		isFloating = true;
+		// Pindah ke background — overlay tampil di atas semua app
+		moveTaskToBack(true);
 	}
 
 	private static final String ACTION_PIP_RESIZE  = "j2me.pip.resize";
@@ -909,39 +917,19 @@ public class MicroActivity extends AppCompatActivity {
 	@Override
 	public void onPictureInPictureModeChanged(boolean isInPiP, Configuration newConfig) {
 		super.onPictureInPictureModeChanged(isInPiP, newConfig);
-
+		isFloating = isInPiP;
 		if (isInPiP) {
-			// Masuk PiP — sembunyikan UI
-			isFloating = true;
 			getSupportActionBar().hide();
 			binding.toolbar.setVisibility(View.GONE);
-			// Lepas audio focus — biar WA VC bebas pakai audio
-			AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-			if (am != null) am.abandonAudioFocus(null);
 			showBubble();
 		} else {
-			// Keluar dari PiP
-			// Cek apakah ini karena app lain (WA VC) yang minta PiP
-			// atau memang user yang sengaja keluar
-			if (isFloating) {
-				// Kita ditendang keluar PiP oleh app lain
-				// Jangan tampilkan fullscreen — pindah ke background
-				isFloating = false;
-				removeBubble();
-				pipLocked = false;
-				pipPinned = false;
-				// Game tetap jalan, activity ke background
-				moveTaskToBack(true);
-			} else {
-				// User sengaja keluar PiP — restore fullscreen
-				if (actionBarEnabled) {
-					getSupportActionBar().show();
-					binding.toolbar.setVisibility(View.VISIBLE);
-				}
-				removeBubble();
-				pipLocked = false;
-				pipPinned = false;
+			if (actionBarEnabled) {
+				getSupportActionBar().show();
+				binding.toolbar.setVisibility(View.VISIBLE);
 			}
+			removeBubble();
+			pipLocked = false;
+			pipPinned = false;
 		}
 	}
 
@@ -1083,7 +1071,8 @@ public class MicroActivity extends AppCompatActivity {
 
 	private final Runnable hideBubbleRunnable = () -> {
 		if (bubbleView != null && bubbleVisible) {
-			bubbleView.animate().alpha(0f).setDuration(400).start();
+			// Fade ke transparan 20% — tidak hilang total, masih kelihatan samar
+			bubbleView.animate().alpha(0.18f).setDuration(600).start();
 			bubbleVisible = false;
 		}
 	};
@@ -1098,19 +1087,21 @@ public class MicroActivity extends AppCompatActivity {
 		}
 		bubbleWm = (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
 		float dp = getResources().getDisplayMetrics().density;
-		int size = (int) (46 * dp); // lebih kecil, lebih natural
+		int size = (int) (44 * dp);
 
 		FrameLayout bubble = new FrameLayout(this);
-		bubble.setBackgroundColor(0xEE000000);
+		// Transparan sedikit dari awal — tidak solid hitam
+		bubble.setBackgroundColor(0xCC000000);
 
 		ImageButton btn = new ImageButton(this);
 		btn.setImageResource(android.R.drawable.ic_media_play);
 		btn.setBackgroundColor(0x00000000);
 		FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-				(int)(32*dp), (int)(32*dp), Gravity.CENTER);
+				(int)(28*dp), (int)(28*dp), Gravity.CENTER);
 		bubble.addView(btn, lp);
 		bubbleView = bubble;
 		bubbleVisible = true;
+		bubbleView.setAlpha(1f);
 
 		bubbleWp = new android.view.WindowManager.LayoutParams(
 				size, size,
@@ -1124,15 +1115,17 @@ public class MicroActivity extends AppCompatActivity {
 		bubbleWp.y = 300;
 		bubbleWm.addView(bubbleView, bubbleWp);
 
-		// Auto hide setelah 3 detik
+		// Auto hide setelah 5 detik (lebih lama dari sebelumnya)
 		scheduleHideBubble();
 
-		// Tap: ganti ukuran PiP + tampilkan menu fitur
 		btn.setOnClickListener(v -> {
+			// Selalu tampilkan penuh dulu saat diklik
+			bubbleView.animate().alpha(1f).setDuration(150).start();
+			bubbleVisible = true;
+			bubbleHandler.removeCallbacks(hideBubbleRunnable);
 			showBubbleMenu();
 		});
 
-		// Tahan lama: langsung ganti ukuran PiP
 		btn.setOnLongClickListener(v -> {
 			pipSize = (pipSize + 1) % 2;
 			removeBubble();
@@ -1140,30 +1133,28 @@ public class MicroActivity extends AppCompatActivity {
 			return true;
 		});
 
-		// Drag bubble
-		btn.setOnTouchListener(new android.view.View.OnTouchListener() {
+		// Drag bubble — sentuh area bubble mana saja
+		bubble.setOnTouchListener(new android.view.View.OnTouchListener() {
 			int ix, iy;
 			float tx, ty;
+			long downTime;
 			@Override
 			public boolean onTouch(android.view.View v, android.view.MotionEvent e) {
-				// Tampilkan bubble kembali saat disentuh
-				if (!bubbleVisible) {
-					bubbleView.animate().alpha(1f).setDuration(200).start();
-					bubbleVisible = true;
-					scheduleHideBubble();
-					return true;
-				}
 				switch (e.getAction()) {
 					case android.view.MotionEvent.ACTION_DOWN:
+						// Muncul kembali saat disentuh
+						bubbleView.animate().alpha(1f).setDuration(150).start();
+						bubbleVisible = true;
+						bubbleHandler.removeCallbacks(hideBubbleRunnable);
 						ix = bubbleWp.x; iy = bubbleWp.y;
 						tx = e.getRawX(); ty = e.getRawY();
-						bubbleHandler.removeCallbacks(hideBubbleRunnable);
-						return false;
+						downTime = System.currentTimeMillis();
+						return true;
 					case android.view.MotionEvent.ACTION_MOVE:
-						if (pipPinned) return true; // pin aktif - tidak bisa geser
+						if (pipPinned) return true;
 						float dx = e.getRawX() - tx;
 						float dy = e.getRawY() - ty;
-						if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+						if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
 							bubbleWp.x = ix + (int) dx;
 							bubbleWp.y = iy + (int) dy;
 							if (bubbleView != null)
@@ -1171,8 +1162,15 @@ public class MicroActivity extends AppCompatActivity {
 						}
 						return true;
 					case android.view.MotionEvent.ACTION_UP:
+						// Tap cepat = buka menu
+						if (System.currentTimeMillis() - downTime < 200
+								&& Math.abs(e.getRawX()-tx) < 10
+								&& Math.abs(e.getRawY()-ty) < 10) {
+							showBubbleMenu();
+						}
+						// Jadwalkan hide lagi setelah 5 detik
 						scheduleHideBubble();
-						return false;
+						return true;
 				}
 				return false;
 			}
@@ -1181,9 +1179,8 @@ public class MicroActivity extends AppCompatActivity {
 
 	private void scheduleHideBubble() {
 		bubbleHandler.removeCallbacks(hideBubbleRunnable);
-		if (bubbleAutoHide) {
-			bubbleHandler.postDelayed(hideBubbleRunnable, 3000);
-		}
+		// Auto hide setelah 5 detik — lebih lama, tidak cepat hilang
+		bubbleHandler.postDelayed(hideBubbleRunnable, 5000);
 	}
 
 	// Menu saat tap bubble — semua fitur di sini
