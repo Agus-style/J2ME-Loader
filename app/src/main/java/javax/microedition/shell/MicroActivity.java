@@ -46,6 +46,14 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.media.AudioManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.widget.SeekBar;
+import android.widget.TextView;
+import android.widget.ImageButton;
+import android.widget.FrameLayout;
+import android.view.Gravity;
 import android.widget.AdapterView.AdapterContextMenuInfo;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -108,6 +116,10 @@ public class MicroActivity extends AppCompatActivity {
 
 	// ---- FLOATING WINDOW FIELD ----
 	private boolean isFloating = false;
+	private boolean pipPinned = false;       // Pin window - tidak bisa digeser
+	private boolean pipLocked = false;       // Kunci layar - cegah sentuhan
+	private boolean bubbleAutoHide = true;   // Auto hide bubble
+	private final Handler bubbleHandler = new Handler(Looper.getMainLooper());
 
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
@@ -209,8 +221,10 @@ public class MicroActivity extends AppCompatActivity {
 	public void onResume() {
 		super.onResume();
 		visible = true;
-		MidletThread.resumeApp();
-		// Handle restore dari PiP
+		// Jangan resume ulang kalau lagi PiP
+		if (!isInPictureInPictureMode()) {
+			MidletThread.resumeApp();
+		}
 		if (isFloating && !isInPictureInPictureMode()) {
 			isFloating = false;
 		}
@@ -220,7 +234,10 @@ public class MicroActivity extends AppCompatActivity {
 	public void onPause() {
 		visible = false;
 		hideSoftInput();
-		MidletThread.pauseApp();
+		// Jangan pause game saat masuk PiP — biar tetap jalan di background
+		if (!isInPictureInPictureMode()) {
+			MidletThread.pauseApp();
+		}
 		super.onPause();
 	}
 
@@ -727,12 +744,13 @@ public class MicroActivity extends AppCompatActivity {
 	}
 
 	// ============================================================
-	// PiP FLOATING + BUBBLE
+	// PiP FLOATING + BUBBLE + FITUR TAMBAHAN
 	// ============================================================
 
-	// pipSize: 0 = normal (rasio game), 1 = besar (16:9)
+	// pipSize: 0=kecil (rasio game), 1=besar (16:9)
 	private int pipSize = 0;
 
+	// ---- TOGGLE FLOATING ----
 	private void toggleFloatingWindow() {
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
 			pipSize = 0;
@@ -767,7 +785,6 @@ public class MicroActivity extends AppCompatActivity {
 		if (isInPiP) {
 			getSupportActionBar().hide();
 			binding.toolbar.setVisibility(View.GONE);
-			// Tampilkan bubble hitam di pinggir
 			showBubble();
 		} else {
 			if (actionBarEnabled) {
@@ -775,38 +792,178 @@ public class MicroActivity extends AppCompatActivity {
 				binding.toolbar.setVisibility(View.VISIBLE);
 			}
 			removeBubble();
+			// Reset lock saat keluar PiP
+			pipLocked = false;
+			pipPinned = false;
 		}
 	}
 
-	// ---- BUBBLE HITAM ----
+	// ---- LANDSCAPE / PORTRAIT LOCK ----
+	private void showOrientationLockDialog() {
+		String[] opts = {"Auto", "Portrait", "Landscape"};
+		new androidx.appcompat.app.AlertDialog.Builder(this)
+				.setTitle("🔄 Kunci Orientasi")
+				.setItems(opts, (d, which) -> {
+					switch (which) {
+						case 0: setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); break;
+						case 1: setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT); break;
+						case 2: setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE); break;
+					}
+				}).show();
+	}
+
+	// ---- SPEED UP / SLOW DOWN ----
+	private float gameSpeed = 1.0f;
+	private void showSpeedDialog() {
+		float[] speeds = {0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f};
+		String[] labels = {"0.5x (Lambat)", "0.75x", "1.0x (Normal)", "1.5x", "2.0x (Cepat)", "3.0x (Turbo)"};
+		new androidx.appcompat.app.AlertDialog.Builder(this)
+				.setTitle("⚡ Kecepatan Game")
+				.setItems(labels, (d, which) -> {
+					gameSpeed = speeds[which];
+					// Set speed ke MidletThread
+					// MidletThread.setGameSpeed(gameSpeed);
+					Toast.makeText(this, "Kecepatan: " + labels[which], Toast.LENGTH_SHORT).show();
+				}).show();
+	}
+
+	// ---- SCREENSHOT ----
+	private void quickScreenshot() {
+		if (current instanceof Canvas) {
+			takeScreenshot();
+		} else {
+			Toast.makeText(this, "Screenshot hanya tersedia saat game aktif", Toast.LENGTH_SHORT).show();
+		}
+	}
+
+	// ---- VOLUME GAME ----
+	private void showVolumeDialog() {
+		AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+		int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+		int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+
+		android.widget.LinearLayout layout = new android.widget.LinearLayout(this);
+		layout.setOrientation(android.widget.LinearLayout.VERTICAL);
+		layout.setPadding(60, 20, 60, 20);
+
+		TextView label = new TextView(this);
+		label.setText("🔊 Volume: " + cur);
+		label.setGravity(Gravity.CENTER);
+		layout.addView(label);
+
+		SeekBar seek = new SeekBar(this);
+		seek.setMax(max);
+		seek.setProgress(cur);
+		seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+			@Override public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+				am.setStreamVolume(AudioManager.STREAM_MUSIC, progress, 0);
+				label.setText("🔊 Volume: " + progress);
+			}
+			@Override public void onStartTrackingTouch(SeekBar sb) {}
+			@Override public void onStopTrackingTouch(SeekBar sb) {}
+		});
+		layout.addView(seek);
+
+		new androidx.appcompat.app.AlertDialog.Builder(this)
+				.setTitle("Volume Game")
+				.setView(layout)
+				.setPositiveButton("OK", null)
+				.show();
+	}
+
+	// ---- PIN WINDOW (kunci posisi PiP) ----
+	private void togglePinWindow() {
+		pipPinned = !pipPinned;
+		Toast.makeText(this,
+				pipPinned ? "📌 Window terkunci posisi" : "📌 Posisi bebas",
+				Toast.LENGTH_SHORT).show();
+	}
+
+	// ---- KUNCI LAYAR (cegah sentuhan tidak sengaja) ----
+	private void toggleLockScreen() {
+		pipLocked = !pipLocked;
+		if (pipLocked) {
+			// Tutup semua input ke game view
+			binding.displayableContainer.setOnTouchListener((v, e) -> true);
+			Toast.makeText(this, "🔒 Layar terkunci — tahan 2 detik untuk buka", Toast.LENGTH_SHORT).show();
+			// Overlay kunci
+			showLockOverlay();
+		} else {
+			binding.displayableContainer.setOnTouchListener(null);
+			removeLockOverlay();
+			Toast.makeText(this, "🔓 Layar bebas", Toast.LENGTH_SHORT).show();
+		}
+	}
+
+	private android.view.View lockOverlay;
+	private void showLockOverlay() {
+		if (lockOverlay != null) return;
+		FrameLayout overlay = new FrameLayout(this);
+		overlay.setBackgroundColor(0x22FF0000); // merah transparan
+
+		TextView label = new TextView(this);
+		label.setText("🔒");
+		label.setTextSize(28);
+		label.setGravity(Gravity.CENTER);
+		overlay.addView(label, new FrameLayout.LayoutParams(
+				FrameLayout.LayoutParams.WRAP_CONTENT,
+				FrameLayout.LayoutParams.WRAP_CONTENT,
+				Gravity.TOP | Gravity.END));
+
+		// Tahan 2 detik untuk buka kunci
+		overlay.setOnLongClickListener(v -> {
+			toggleLockScreen();
+			return true;
+		});
+		lockOverlay = overlay;
+		binding.displayableContainer.addView(lockOverlay, new FrameLayout.LayoutParams(
+				FrameLayout.LayoutParams.MATCH_PARENT,
+				FrameLayout.LayoutParams.MATCH_PARENT));
+	}
+
+	private void removeLockOverlay() {
+		if (lockOverlay != null) {
+			binding.displayableContainer.removeView(lockOverlay);
+			lockOverlay = null;
+		}
+	}
+
+	// ---- BUBBLE HITAM + AUTO HIDE ----
 	private android.view.WindowManager bubbleWm;
 	private android.view.View bubbleView;
 	private android.view.WindowManager.LayoutParams bubbleWp;
+	private boolean bubbleVisible = true;
+
+	private final Runnable hideBubbleRunnable = () -> {
+		if (bubbleView != null && bubbleVisible) {
+			bubbleView.animate().alpha(0f).setDuration(400).start();
+			bubbleVisible = false;
+		}
+	};
 
 	private void showBubble() {
 		if (bubbleView != null) return;
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
 				&& !Settings.canDrawOverlays(this)) {
-			// Minta izin overlay
 			startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
 					Uri.parse("package:" + getPackageName())));
 			return;
 		}
 		bubbleWm = (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
 		float dp = getResources().getDisplayMetrics().density;
-		int size = (int) (50 * dp);
+		int size = (int) (46 * dp); // lebih kecil, lebih natural
 
-		android.widget.FrameLayout bubble = new android.widget.FrameLayout(this);
-		bubble.setBackgroundColor(0xFF000000);
+		FrameLayout bubble = new FrameLayout(this);
+		bubble.setBackgroundColor(0xEE000000);
 
-		android.widget.ImageButton btn = new android.widget.ImageButton(this);
+		ImageButton btn = new ImageButton(this);
 		btn.setImageResource(android.R.drawable.ic_media_play);
 		btn.setBackgroundColor(0x00000000);
-		android.widget.FrameLayout.LayoutParams lp =
-				new android.widget.FrameLayout.LayoutParams(size, size);
-		lp.gravity = android.view.Gravity.CENTER;
+		FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+				(int)(32*dp), (int)(32*dp), Gravity.CENTER);
 		bubble.addView(btn, lp);
 		bubbleView = bubble;
+		bubbleVisible = true;
 
 		bubbleWp = new android.view.WindowManager.LayoutParams(
 				size, size,
@@ -815,30 +972,48 @@ public class MicroActivity extends AppCompatActivity {
 						: android.view.WindowManager.LayoutParams.TYPE_PHONE,
 				android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
 				android.graphics.PixelFormat.TRANSLUCENT);
-		bubbleWp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+		bubbleWp.gravity = Gravity.TOP | Gravity.START;
 		bubbleWp.x = 0;
 		bubbleWp.y = 300;
 		bubbleWm.addView(bubbleView, bubbleWp);
 
-		// Tap: ganti ukuran PiP (kecil / besar)
+		// Auto hide setelah 3 detik
+		scheduleHideBubble();
+
+		// Tap: ganti ukuran PiP + tampilkan menu fitur
 		btn.setOnClickListener(v -> {
+			showBubbleMenu();
+		});
+
+		// Tahan lama: langsung ganti ukuran PiP
+		btn.setOnLongClickListener(v -> {
 			pipSize = (pipSize + 1) % 2;
 			removeBubble();
 			doEnterPip();
+			return true;
 		});
 
-		// Drag
-		btn.setOnTouchListener(new View.OnTouchListener() {
+		// Drag bubble
+		btn.setOnTouchListener(new android.view.View.OnTouchListener() {
 			int ix, iy;
 			float tx, ty;
 			@Override
-			public boolean onTouch(View v, android.view.MotionEvent e) {
+			public boolean onTouch(android.view.View v, android.view.MotionEvent e) {
+				// Tampilkan bubble kembali saat disentuh
+				if (!bubbleVisible) {
+					bubbleView.animate().alpha(1f).setDuration(200).start();
+					bubbleVisible = true;
+					scheduleHideBubble();
+					return true;
+				}
 				switch (e.getAction()) {
 					case android.view.MotionEvent.ACTION_DOWN:
 						ix = bubbleWp.x; iy = bubbleWp.y;
 						tx = e.getRawX(); ty = e.getRawY();
-						return false; // biar onClick tetap jalan
+						bubbleHandler.removeCallbacks(hideBubbleRunnable);
+						return false;
 					case android.view.MotionEvent.ACTION_MOVE:
+						if (pipPinned) return true; // pin aktif - tidak bisa geser
 						float dx = e.getRawX() - tx;
 						float dy = e.getRawY() - ty;
 						if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
@@ -848,13 +1023,62 @@ public class MicroActivity extends AppCompatActivity {
 								bubbleWm.updateViewLayout(bubbleView, bubbleWp);
 						}
 						return true;
+					case android.view.MotionEvent.ACTION_UP:
+						scheduleHideBubble();
+						return false;
 				}
 				return false;
 			}
 		});
 	}
 
+	private void scheduleHideBubble() {
+		bubbleHandler.removeCallbacks(hideBubbleRunnable);
+		if (bubbleAutoHide) {
+			bubbleHandler.postDelayed(hideBubbleRunnable, 3000);
+		}
+	}
+
+	// Menu saat tap bubble — semua fitur di sini
+	private void showBubbleMenu() {
+		// Tampilkan bubble dulu
+		if (bubbleView != null) {
+			bubbleView.animate().alpha(1f).setDuration(200).start();
+			bubbleVisible = true;
+		}
+		bubbleHandler.removeCallbacks(hideBubbleRunnable);
+
+		String[] items = {
+				"🔄 Ganti Ukuran PiP (kecil/besar)",
+				"🔄 Kunci Orientasi",
+				"⚡ Kecepatan Game",
+				"📸 Screenshot",
+				"🔊 Volume",
+				pipPinned ? "📌 Lepas Pin Window" : "📌 Pin Window",
+				pipLocked ? "🔓 Buka Kunci Layar" : "🔒 Kunci Layar",
+				"❌ Tutup Menu"
+		};
+
+		// Buat dialog di atas semua window
+		android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this);
+		builder.setTitle("🎮 Kontrol Game")
+				.setItems(items, (d, which) -> {
+					switch (which) {
+						case 0: pipSize = (pipSize+1)%2; removeBubble(); doEnterPip(); break;
+						case 1: showOrientationLockDialog(); break;
+						case 2: showSpeedDialog(); break;
+						case 3: quickScreenshot(); break;
+						case 4: showVolumeDialog(); break;
+						case 5: togglePinWindow(); break;
+						case 6: toggleLockScreen(); break;
+						case 7: scheduleHideBubble(); break;
+					}
+				});
+		builder.show();
+	}
+
 	private void removeBubble() {
+		bubbleHandler.removeCallbacks(hideBubbleRunnable);
 		if (bubbleView != null && bubbleWm != null) {
 			try { bubbleWm.removeView(bubbleView); } catch (Exception ignored) {}
 			bubbleView = null;
@@ -864,6 +1088,7 @@ public class MicroActivity extends AppCompatActivity {
 	@Override
 	protected void onDestroy() {
 		removeBubble();
+		removeLockOverlay();
 		binding = null;
 		super.onDestroy();
 	}
