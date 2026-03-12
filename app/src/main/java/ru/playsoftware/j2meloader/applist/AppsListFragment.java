@@ -278,7 +278,6 @@ public class AppsListFragment extends ListFragment {
 	private void startAppFloating(AppItem appItem) {
 		FragmentActivity activity = requireActivity();
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-			// Ukuran floating window: 65% layar
 			DisplayMetrics dm = getResources().getDisplayMetrics();
 			int w = (int) (dm.widthPixels * 0.65f);
 			int h = (int) (dm.heightPixels * 0.60f);
@@ -286,35 +285,44 @@ public class AppsListFragment extends ListFragment {
 			int y = (int) (dm.heightPixels * 0.10f);
 
 			Rect bounds = new Rect(x, y, x + w, y + h);
-			ActivityOptions opts = ActivityOptions.makeFreeformAppearAnimation(
-					activity, bounds);
+			ActivityOptions opts = ActivityOptions.makeBasic();
+			opts.setLaunchBounds(bounds);
 
-			// Gunakan Config.startApp dengan options freeform
-			Intent intent = Config.buildAppIntent(activity,
-					appItem.getTitle(), appItem.getPathExt(), false);
-			if (intent != null) {
-				intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
-						Intent.FLAG_ACTIVITY_MULTIPLE_TASK |
-						Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT);
-				try {
-					activity.startActivity(intent, opts.toBundle());
-				} catch (Exception e) {
-					// Fallback jika freeform tidak support
-					Toast.makeText(activity,
-							"Freeform tidak didukung, buka normal",
-							Toast.LENGTH_SHORT).show();
-					Config.startApp(activity, appItem.getTitle(),
-							appItem.getPathExt(), false);
-				}
+			String path = appItem.getPathExt();
+			String name = appItem.getTitle();
+
+			// Cek apakah config sudah ada
+			java.io.File appDir = new java.io.File(path);
+			java.io.File configFile = new java.io.File(
+					appDir.getParentFile().getParent()
+					+ ru.playsoftware.j2meloader.config.Config.MIDLET_CONFIGS_DIR
+					+ appDir.getName());
+
+			Intent intent;
+			if (configFile.exists()) {
+				// Langsung jalankan game
+				intent = new Intent(Intent.ACTION_DEFAULT,
+						android.net.Uri.parse(path),
+						activity,
+						javax.microedition.shell.MicroActivity.class);
 			} else {
-				// Fallback jika Config tidak punya buildAppIntent
-				Config.startApp(activity, appItem.getTitle(),
-						appItem.getPathExt(), false);
+				// Buka settings dulu
+				intent = new Intent(ru.playsoftware.j2meloader.util.Constants.ACTION_EDIT,
+						android.net.Uri.parse(path),
+						activity,
+						ru.playsoftware.j2meloader.config.ConfigActivity.class);
+			}
+			intent.putExtra(ru.playsoftware.j2meloader.util.Constants.KEY_MIDLET_NAME, name);
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
+					Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+			try {
+				activity.startActivity(intent, opts.toBundle());
+			} catch (Exception e) {
+				Toast.makeText(activity, "Freeform tidak didukung di HP ini", Toast.LENGTH_SHORT).show();
+				Config.startApp(activity, name, path, false);
 			}
 		} else {
-			Toast.makeText(activity,
-					"Freeform membutuhkan Android 7.0+",
-					Toast.LENGTH_SHORT).show();
+			Toast.makeText(activity, "Membutuhkan Android 7.0+", Toast.LENGTH_SHORT).show();
 		}
 	}
 
