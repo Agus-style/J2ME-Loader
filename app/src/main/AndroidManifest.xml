@@ -169,7 +169,7 @@
             android:name="com.nokia.mid.ui.NotificationBroadcastReceiver"
             android:process=":midlet" />
         <service
-            android:name="javax.microedition.shell.FloatingGameService"
+            android:name="javax.microedition.shell.GameOverlayService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="false"
             android:process=":midlet" />
