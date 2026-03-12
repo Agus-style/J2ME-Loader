@@ -769,6 +769,11 @@ public class MicroActivity extends AppCompatActivity {
 			public ViewGroup getGameView() {
 				return binding.displayableContainer;
 			}
+
+			@Override
+			public void dispatchTouchToGame(android.view.MotionEvent event, float scaleX, float scaleY) {
+				runOnUiThread(() -> binding.displayableContainer.dispatchTouchEvent(event));
+			}
 		};
 
 		Intent serviceIntent = new Intent(this, FloatingGameService.class)
