@@ -31,6 +31,7 @@ import android.content.res.TypedArray;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
+import android.net.wifi.WifiManager;
 import android.provider.Settings;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -129,6 +130,8 @@ public class MicroActivity extends AppCompatActivity {
 	private boolean backgroundRunning = false;
 	// WakeLock — game tetap jalan saat layar mati
 	private PowerManager.WakeLock wakeLock;
+	// WifiLock — koneksi WiFi tidak tidur saat layar mati
+	private WifiManager.WifiLock wifiLock;
 	private boolean pipPinned = false;       // Pin window - tidak bisa digeser
 	private boolean pipLocked = false;       // Kunci layar - cegah sentuhan
 	private boolean bubbleAutoHide = true;   // Auto hide bubble
@@ -148,6 +151,12 @@ public class MicroActivity extends AppCompatActivity {
 		if (pm != null) {
 			wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "J2MELoader:GameRunning");
 			wakeLock.acquire();
+		}
+		// WifiLock — WiFi tidak tidur saat layar mati (penting untuk game online)
+		WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+		if (wm != null) {
+			wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "J2MELoader:GameWifi");
+			wifiLock.acquire();
 		}
 		setSupportActionBar(binding.toolbar);
 
@@ -1237,6 +1246,10 @@ public class MicroActivity extends AppCompatActivity {
 		// Lepas WakeLock saat game selesai
 		if (wakeLock != null && wakeLock.isHeld()) {
 			wakeLock.release();
+		}
+		// Lepas WifiLock saat game selesai
+		if (wifiLock != null && wifiLock.isHeld()) {
+			wifiLock.release();
 		}
 		binding = null;
 		super.onDestroy();
