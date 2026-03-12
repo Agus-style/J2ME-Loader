@@ -25,6 +25,7 @@ import static ru.playsoftware.j2meloader.util.Constants.PREF_LAST_PATH;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.ActivityOptions;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -36,8 +37,10 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.ContextMenu;
 import android.view.LayoutInflater;
@@ -264,10 +267,55 @@ public class AppsListFragment extends ListFragment {
 			InstallerDialog.newInstance(appItem.getId()).show(getParentFragmentManager(), "installer");
 		} else if (itemId == R.id.action_context_delete) {
 			alertDelete(appItem);
+		} else if (itemId == R.id.action_context_floating) {
+			startAppFloating(appItem);
 		} else {
 			return super.onContextItemSelected(item);
 		}
 		return true;
+	}
+
+	private void startAppFloating(AppItem appItem) {
+		FragmentActivity activity = requireActivity();
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+			// Ukuran floating window: 65% layar
+			DisplayMetrics dm = getResources().getDisplayMetrics();
+			int w = (int) (dm.widthPixels * 0.65f);
+			int h = (int) (dm.heightPixels * 0.60f);
+			int x = (dm.widthPixels - w) / 2;
+			int y = (int) (dm.heightPixels * 0.10f);
+
+			Rect bounds = new Rect(x, y, x + w, y + h);
+			ActivityOptions opts = ActivityOptions.makeFreeformAppearAnimation(
+					activity, bounds);
+
+			// Gunakan Config.startApp dengan options freeform
+			Intent intent = Config.buildAppIntent(activity,
+					appItem.getTitle(), appItem.getPathExt(), false);
+			if (intent != null) {
+				intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
+						Intent.FLAG_ACTIVITY_MULTIPLE_TASK |
+						Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT);
+				try {
+					activity.startActivity(intent, opts.toBundle());
+				} catch (Exception e) {
+					// Fallback jika freeform tidak support
+					Toast.makeText(activity,
+							"Freeform tidak didukung, buka normal",
+							Toast.LENGTH_SHORT).show();
+					Config.startApp(activity, appItem.getTitle(),
+							appItem.getPathExt(), false);
+				}
+			} else {
+				// Fallback jika Config tidak punya buildAppIntent
+				Config.startApp(activity, appItem.getTitle(),
+						appItem.getPathExt(), false);
+			}
+		} else {
+			Toast.makeText(activity,
+					"Freeform membutuhkan Android 7.0+",
+					Toast.LENGTH_SHORT).show();
+		}
 	}
 
 	private void requestAddShortcut(AppItem appItem) {
