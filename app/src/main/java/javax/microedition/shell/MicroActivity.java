@@ -753,26 +753,54 @@ public class MicroActivity extends AppCompatActivity {
 	private void startFloatingWindow() {
 		FloatingGameService.callback = new FloatingGameService.FloatingCallback() {
 			@Override
-			public void onRestoreToFullscreen() {
-				runOnUiThread(() -> {
-					ViewGroup gameView = binding.displayableContainer;
-					if (gameView.getParent() != null
-							&& gameView.getParent() != binding.getRoot()) {
-						((ViewGroup) gameView.getParent()).removeView(gameView);
-						((ViewGroup) binding.getRoot()).addView(gameView);
+			public android.graphics.Bitmap getGameBitmap() {
+				// Ambil bitmap dari Canvas game J2ME
+				Displayable current = getCurrent();
+				if (current instanceof javax.microedition.lcdui.Canvas) {
+					javax.microedition.lcdui.Canvas canvas = (javax.microedition.lcdui.Canvas) current;
+					final android.graphics.Bitmap[] result = {null};
+					final Object lock = new Object();
+					canvas.getScreenShot()
+							.subscribeOn(io.reactivex.schedulers.Schedulers.io())
+							.subscribe(
+									bmp -> {
+										synchronized (lock) {
+											result[0] = bmp;
+											lock.notifyAll();
+										}
+									},
+									err -> {
+										synchronized (lock) {
+											lock.notifyAll();
+										}
+									}
+							);
+					synchronized (lock) {
+						try { lock.wait(100); } catch (InterruptedException ignored) {}
 					}
-					isFloating = false;
-				});
+					return result[0];
+				}
+				return null;
 			}
 
 			@Override
-			public ViewGroup getGameView() {
-				return binding.displayableContainer;
+			public void onRestoreToFullscreen() {
+				runOnUiThread(() -> isFloating = false);
 			}
 
 			@Override
-			public void dispatchTouchToGame(android.view.MotionEvent event, float scaleX, float scaleY) {
+			public void dispatchTouchToGame(android.view.MotionEvent event) {
 				runOnUiThread(() -> binding.displayableContainer.dispatchTouchEvent(event));
+			}
+
+			@Override
+			public int getGameWidth() {
+				return binding.displayableContainer.getWidth();
+			}
+
+			@Override
+			public int getGameHeight() {
+				return binding.displayableContainer.getHeight();
 			}
 		};
 
