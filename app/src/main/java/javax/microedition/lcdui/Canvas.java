@@ -228,54 +228,6 @@ public abstract class Canvas extends Displayable {
 		screenshotRawMode = enable;
 	}
 
-	// ---- OVERLAY WINDOW SUPPORT ----
-	// Expose bitmap game untuk mirror ke overlay window
-	public Bitmap getOffscreenBitmap() {
-		if (offscreenCopy == null) return null;
-		synchronized (bufferLock) {
-			Bitmap src = offscreenCopy.getBitmap();
-			if (src == null || src.isRecycled()) return null;
-			return src.copy(Bitmap.Config.ARGB_8888, false);
-		}
-	}
-
-	// Dispatch touch event dari overlay ke game dengan konversi koordinat
-	// overlayW/overlayH = ukuran overlay window di layar
-	public void dispatchOverlayTouch(MotionEvent event, int overlayW, int overlayH) {
-		if (!touchInput) return;
-		int action = event.getActionMasked();
-		int index = event.getActionIndex();
-		int id = event.getPointerId(index);
-		// Skala dari koordinat overlay ke koordinat game
-		float scaleX = (float) width / overlayW;
-		float scaleY = (float) height / overlayH;
-		float gx = event.getX(index) * scaleX;
-		float gy = event.getY(index) * scaleY;
-		int cX = Math.round(gx);
-		int cY = Math.round(gy);
-		switch (action) {
-			case MotionEvent.ACTION_DOWN:
-			case MotionEvent.ACTION_POINTER_DOWN:
-				if (id < 20) { lastPointerPos[id][0] = cX; lastPointerPos[id][1] = cY; }
-				Display.postEvent(CanvasEvent.getInstance(this, CanvasEvent.POINTER_PRESSED, id, cX, cY));
-				break;
-			case MotionEvent.ACTION_MOVE:
-				for (int p = 0; p < event.getPointerCount(); p++) {
-					int pid = event.getPointerId(p);
-					int mx = Math.round(event.getX(p) * scaleX);
-					int my = Math.round(event.getY(p) * scaleY);
-					if (pid < 20) { lastPointerPos[pid][0] = mx; lastPointerPos[pid][1] = my; }
-					Display.postEvent(CanvasEvent.getInstance(this, CanvasEvent.POINTER_DRAGGED, pid, mx, my));
-				}
-				break;
-			case MotionEvent.ACTION_UP:
-			case MotionEvent.ACTION_POINTER_UP:
-				if (id < 20) { lastPointerPos[id][0] = cX; lastPointerPos[id][1] = cY; }
-				Display.postEvent(CanvasEvent.getInstance(this, CanvasEvent.POINTER_RELEASED, id, cX, cY));
-				break;
-		}
-	}
-
 	public int getKeyCode(int gameAction) {
 		int res = KeyMapper.getKeyCode(gameAction);
 		if (res != Integer.MAX_VALUE) {
